@@ -8,6 +8,8 @@ export type ClockFields = {
   clockMode: string | null;
   clockAnchorReal: Date | null;
   clockAnchorSim: Date | null;
+  /** Fuso do navegador do usuário (convenção getTimezoneOffset: UTC−3 → 180). */
+  clockTzOffset?: number | null;
 };
 
 export type ClockUser = {
@@ -49,21 +51,48 @@ export class ClockUpdateError extends Error {
   }
 }
 
-/** Valida data/hora local do servidor sem aceitar normalizações silenciosas. */
-export function clockAnchorFor(targetDate: string, targetTime: string): { real: Date; sim: Date } {
+/** Limites razoáveis de fuso (±15 h) na convenção `getTimezoneOffset`. */
+const TZ_OFFSET_LIMIT = 900;
+
+/**
+ * Aceita o offset vindo do cliente. `undefined`/`null` → fuso do servidor
+ * (comportamento legado); tipo inválido ou inteiro fora da faixa → erro 400.
+ */
+export function normalizeTzOffset(value: unknown, fallback: number): number {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "number" || !Number.isInteger(value) || Math.abs(value) > TZ_OFFSET_LIMIT) {
+    throw new ClockUpdateError("Fuso horário inválido. Recarregue a página e tente novamente.", 400);
+  }
+  return value;
+}
+
+/** Valida data/hora no fuso do usuário sem aceitar normalizações silenciosas. */
+export function clockAnchorFor(
+  targetDate: string,
+  targetTime: string,
+  tzOffsetMinutes: number = new Date().getTimezoneOffset(),
+): { real: Date; sim: Date } {
+  if (!Number.isInteger(tzOffsetMinutes) || Math.abs(tzOffsetMinutes) > TZ_OFFSET_LIMIT) {
+    throw new ClockUpdateError("Fuso horário inválido. Recarregue a página e tente novamente.", 400);
+  }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(targetTime)) {
     throw new ClockUpdateError("Informe uma data e hora válidas.", 400);
   }
   const [year, month, day] = targetDate.split("-").map(Number);
   const [hour, minute] = targetTime.split(":").map(Number);
-  const sim = new Date(`${targetDate}T${targetTime}:00`);
+  // Parede de referência: os componentes escolhidos lidos como UTC. Serve tanto
+  // para validar (Date.UTC normaliza datas inexistentes) quanto para calcular.
+  const wall = new Date(Date.UTC(year, month - 1, day, hour, minute));
   if (
-    !Number.isFinite(sim.getTime()) || year < 1 ||
-    sim.getFullYear() !== year || sim.getMonth() !== month - 1 || sim.getDate() !== day ||
-    sim.getHours() !== hour || sim.getMinutes() !== minute
+    !Number.isFinite(wall.getTime()) || year < 1 ||
+    wall.getUTCFullYear() !== year || wall.getUTCMonth() !== month - 1 || wall.getUTCDate() !== day ||
+    wall.getUTCHours() !== hour || wall.getUTCMinutes() !== minute
   ) {
     throw new ClockUpdateError("A data ou hora informada não existe. Confira os campos.", 400);
   }
+  // Converte a parede do fuso do usuário para o instante real:
+  // UTC = parede + offset (ex.: 15:00 com offset 180 (UTC−3) → 18:00Z).
+  const sim = new Date(wall.getTime() + tzOffsetMinutes * 60000);
   // Esta âncora SEMPRE usa o relógio real. Nunca altera a expiração do login.
   return { real: new Date(), sim };
 }
@@ -73,7 +102,12 @@ export function clockAnchorFor(targetDate: string, targetTime: string): { real: 
  * legada de estudos. Valida a categoria no banco e altera só a conta autenticada.
  * Não escreve, exclui ou renova nenhuma sessão de autenticação.
  */
-export async function updateUserClock(userId: string, studyDate: unknown, startTime: unknown): Promise<void> {
+export async function updateUserClock(
+  userId: string,
+  studyDate: unknown,
+  startTime: unknown,
+  tzOffset?: unknown,
+): Promise<void> {
   await db.transaction(async (tx) => {
     const [user] = await tx.select({ role: appUsers.role })
       .from(appUsers).where(eq(appUsers.id, userId)).limit(1).for("update");
@@ -83,21 +117,25 @@ export async function updateUserClock(userId: string, studyDate: unknown, startT
     if (typeof studyDate !== "string" || typeof startTime !== "string") {
       throw new ClockUpdateError("Informe a data e a hora para definir o relógio.", 400);
     }
+    // O fuso informado pelo navegador é persistido mesmo no modo auto: os
+    // registros de data/hora da plataforma passam a usar o fuso do usuário.
+    const resolvedTz = normalizeTzOffset(tzOffset, new Date().getTimezoneOffset());
     const date = studyDate.trim();
     const time = startTime.trim();
     if (!date && !time) {
       await tx.update(appUsers).set({
-        clockMode: "auto", clockAnchorReal: null, clockAnchorSim: null, updatedAt: new Date(),
+        clockMode: "auto", clockAnchorReal: null, clockAnchorSim: null,
+        clockTzOffset: resolvedTz, updatedAt: new Date(),
       }).where(eq(appUsers.id, userId));
       return;
     }
     if (!date || !time) {
       throw new ClockUpdateError("Preencha a data e a hora. Para restaurar, use Sincronizar.", 400);
     }
-    const anchor = clockAnchorFor(date, time);
+    const anchor = clockAnchorFor(date, time, resolvedTz);
     await tx.update(appUsers).set({
       clockMode: "simulated", clockAnchorReal: anchor.real, clockAnchorSim: anchor.sim,
-      updatedAt: anchor.real,
+      clockTzOffset: resolvedTz, updatedAt: anchor.real,
     }).where(eq(appUsers.id, userId));
   });
 }
@@ -110,6 +148,7 @@ export async function loadClockUser(userId: string): Promise<ClockUser | null> {
       clockMode: appUsers.clockMode,
       clockAnchorReal: appUsers.clockAnchorReal,
       clockAnchorSim: appUsers.clockAnchorSim,
+      clockTzOffset: appUsers.clockTzOffset,
     })
     .from(appUsers)
     .where(eq(appUsers.id, userId))

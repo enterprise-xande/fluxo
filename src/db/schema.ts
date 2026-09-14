@@ -50,6 +50,10 @@ export const appUsers = pgTable("app_users", {
   clockMode: varchar("clock_mode", { length: 20 }).default("auto").notNull(),
   clockAnchorReal: timestamp("clock_anchor_real", { withTimezone: true }),
   clockAnchorSim: timestamp("clock_anchor_sim", { withTimezone: true }),
+  // Diferença do fuso do navegador em minutos (convenção Date#getTimezoneOffset:
+  // UTC−3 → 180). Usada para interpretar datas/horas escolhidas pelo usuário no
+  // fuso DELE, e não no fuso do servidor.
+  clockTzOffset: integer("clock_tz_offset").default(0).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
