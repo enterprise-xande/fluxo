@@ -20,15 +20,16 @@ export const DEMO_ACCOUNT = {
 };
 const TOPIC_COLORS = ["violet", "sky", "amber"];
 
-function isoDate(value: Date) {
-  const local = new Date(value.getTime() - value.getTimezoneOffset() * 60000);
+function isoDate(value: Date, tzOffsetMinutes: number = value.getTimezoneOffset()) {
+  // Parede no fuso indicado (convenção getTimezoneOffset: UTC−3 → 180).
+  const local = new Date(value.getTime() - tzOffsetMinutes * 60000);
   return local.toISOString().slice(0, 10);
 }
 
-function dateOffset(days: number, now: Date) {
+function dateOffset(days: number, now: Date, tzOffsetMinutes?: number) {
   const value = new Date(now.getTime());
   value.setDate(value.getDate() + days);
-  return isoDate(value);
+  return isoDate(value, tzOffsetMinutes);
 }
 
 function dateAgo(days: number, now: Date) {
@@ -39,14 +40,17 @@ function dateAgo(days: number, now: Date) {
 }
 
 function addDays(dateIso: string, days: number) {
-  const value = new Date(`${dateIso}T12:00:00`);
-  value.setDate(value.getDate() + days);
-  return isoDate(value);
+  // Aritmética pura de calendário em espaço UTC: independe do fuso do servidor.
+  const [year, month, day] = dateIso.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
 }
 
-function elapsedFor(cycle: { startDate: string; durationDays: number }, now: Date) {
-  const start = new Date(`${cycle.startDate}T12:00:00`).getTime();
-  return Math.max(1, Math.min(cycle.durationDays, Math.floor((now.getTime() - start) / 86400000) + 1));
+function elapsedFor(cycle: { startDate: string; durationDays: number }, now: Date, tzOffsetMinutes = 0) {
+  // Ancora o início ao meio-dia UTC e desloca o "agora" para o espaço de parede
+  // do usuário — a contagem de dias vira exatamente à meia-noite DELE.
+  const [year, month, day] = cycle.startDate.split("-").map(Number);
+  const start = Date.UTC(year, month - 1, day, 12);
+  return Math.max(1, Math.min(cycle.durationDays, Math.floor((now.getTime() + tzOffsetMinutes * 60000 - start) / 86400000) + 1));
 }
 
 /** Hora do relógio da plataforma para um usuário (máscara fina sobre resolveNow). */
@@ -268,6 +272,23 @@ export async function createTopic(
   return topic;
 }
 
+/** Atualiza nome e/ou descrição de um tema do usuário. */
+export async function updateTopic(
+  userId: string,
+  topicId: string,
+  input: { name?: string; description?: string | null },
+) {
+  const updates: Record<string, unknown> = { updatedAt: new Date() };
+  if (typeof input.name === "string" && input.name.trim()) updates.name = input.name.trim().slice(0, 160);
+  if (input.description !== undefined) updates.description = input.description?.trim() || null;
+  const [topic] = await db
+    .update(topics)
+    .set(updates)
+    .where(and(eq(topics.id, topicId), eq(topics.userId, userId)))
+    .returning();
+  return topic ?? null;
+}
+
 /** Retorna os IDs (entre os informados) que pertencem ao usuário e estão ativos. */
 export async function ownedTopicIds(userId: string, ids: string[]) {
   const unique = [...new Set(ids.filter(Boolean))];
@@ -311,7 +332,7 @@ export async function deleteTopic(userId: string, topicId: string) {
     .where(eq(topics.id, topicId));
 }
 
-async function buildCycleSummary(userId: string, cycle: typeof studyCycles.$inferSelect, now: Date) {
+async function buildCycleSummary(userId: string, cycle: typeof studyCycles.$inferSelect, now: Date, tzOffsetMinutes = 0) {
   const [sessionRows, taskRows, objectiveRows] = await Promise.all([
     db
       .select({ status: studySessions.status, durationMinutes: studySessions.durationMinutes, isExtra: studySessions.isExtra })
@@ -350,7 +371,8 @@ export async function getStudyDashboard(userId: string) {
   const [user] = await db.select().from(appUsers).where(eq(appUsers.id, userId)).limit(1);
   if (!user) throw new Error("Usuário não encontrado");
   const now = userNow(user);
-  const today = isoDate(now);
+  const tz = user.clockTzOffset ?? 0;
+  const today = isoDate(now, tz);
   const allCycles = await db
     .select()
     .from(studyCycles)
@@ -488,7 +510,7 @@ export async function getStudyDashboard(userId: string) {
       .orderBy(desc(tasks.createdAt)),
   ]);
 
-  const cycles = await Promise.all(allCycles.map((item) => buildCycleSummary(user.id, item, now)));
+  const cycles = await Promise.all(allCycles.map((item) => buildCycleSummary(user.id, item, now, tz)));
   const todaySessions = sessionRows.filter((session) => session.studyDate === today);
   const todaySession =
     todaySessions.find((session) => session.status === "in_progress") ??
@@ -546,7 +568,7 @@ export type CreateCycleInput = {
   schedule: { topicIndex: number; weekdays: number[] }[];
 };
 
-export async function createStudyCycle(userId: string, input: CreateCycleInput, now: Date) {
+export async function createStudyCycle(userId: string, input: CreateCycleInput, now: Date, tzOffsetMinutes: number = now.getTimezoneOffset()) {
   // Só aceita temas existentes que pertençam ao próprio usuário.
   const allowed = await ownedTopicIds(
     userId,
@@ -574,7 +596,7 @@ export async function createStudyCycle(userId: string, input: CreateCycleInput, 
     }
     const validTopicIds = [...new Set(topicIds.filter((id): id is string => Boolean(id)))];
 
-    const today = isoDate(now);
+    const today = isoDate(now, tzOffsetMinutes);
     const [cycle] = await tx
       .insert(studyCycles)
       .values({
@@ -601,20 +623,19 @@ export async function createStudyCycle(userId: string, input: CreateCycleInput, 
       await tx.insert(topicSchedules).values(scheduleRows);
     }
 
-    const from = new Date(`${input.startDate}T12:00:00`);
-    const clamp = new Date(now.getTime());
-    clamp.setDate(clamp.getDate() - 7);
-    const start = from > clamp ? from : clamp;
-    const end = new Date(now.getTime());
-    end.setDate(end.getDate() + 14);
+    // Janela de geração em dias de calendário no fuso do usuário: começa no
+    // máximo entre a data do ciclo e (hoje simulado - 7), termina em (hoje + 14).
+    const clamp = dateOffset(-7, now, tzOffsetMinutes);
+    const start = input.startDate > clamp ? input.startDate : clamp;
+    const end = dateOffset(14, now, tzOffsetMinutes);
 
     const sessionRows: typeof studySessions.$inferInsert[] = [];
-    for (let day = new Date(start); day <= end; day = new Date(day.getTime() + 86400000)) {
-      const weekday = day.getDay();
+    for (let day = new Date(`${start}T12:00:00Z`); isoDate(day, 0) <= end; day = new Date(day.getTime() + 86400000)) {
+      const weekday = day.getUTCDay();
       for (const entry of input.schedule) {
         const topicId = topicIds[entry.topicIndex];
         if (!topicId || !entry.weekdays.includes(weekday)) continue;
-        const date = isoDate(day);
+        const date = isoDate(day, 0);
         sessionRows.push({ userId, cycleId: cycle.id, topicId, plannedDate: date, studyDate: date, status: "planned" });
       }
     }
@@ -640,6 +661,7 @@ export async function updateCycleSchedule(
   cycleId: string,
   entries: { topicId: string; weekdays: number[] }[],
   now: Date,
+  tzOffsetMinutes: number = now.getTimezoneOffset(),
 ) {
   const [cycle] = await db
     .select()
@@ -678,7 +700,7 @@ export async function updateCycleSchedule(
 
     // 3. Sincroniza apenas o planejamento futuro (hoje → horizonte de 14 dias, limitado ao fim do ciclo).
     //    Sessões realizadas/registradas e datas passadas nunca são alteradas.
-    const today = isoDate(now);
+    const today = isoDate(now, tzOffsetMinutes);
     const cycleEnd = addDays(cycle.startDate, cycle.durationDays - 1);
     const windowEnd = addDays(today, 14) < cycleEnd ? addDays(today, 14) : cycleEnd;
     const windowStart = cycle.startDate > today ? cycle.startDate : today;
@@ -695,9 +717,9 @@ export async function updateCycleSchedule(
           byWeekday.set(weekday, list);
         }
       }
-      for (let day = new Date(`${windowStart}T12:00:00`); isoDate(day) <= windowEnd; day = new Date(day.getTime() + 86400000)) {
-        const topicIds = byWeekday.get(day.getDay()) ?? [];
-        const date = isoDate(day);
+      for (let day = new Date(`${windowStart}T12:00:00Z`); isoDate(day, 0) <= windowEnd; day = new Date(day.getTime() + 86400000)) {
+        const topicIds = byWeekday.get(day.getUTCDay()) ?? [];
+        const date = isoDate(day, 0);
         for (const topicId of topicIds) {
           desired.set(keyOf(date, topicId), { studyDate: date, topicId });
         }

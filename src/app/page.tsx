@@ -175,6 +175,7 @@ function Icon({ name, size = 18, stroke = 1.8 }: { name: string; size?: number; 
     play: <path d="m9 6 9 6-9 6V6Z" fill="currentColor" stroke="none" />,
     save: <><path d="M5 3h12l3 3v15H5V3Z" /><path d="M8 3v6h8V3M8 21v-7h8v7" /></>,
     more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></>,
+    "more-v": <><circle cx="12" cy="5" r="1.6" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" /><circle cx="12" cy="19" r="1.6" fill="currentColor" stroke="none" /></>,
     bolt: <path d="m13 2-9 12h7l-1 8 10-13h-7l0-7Z" />,
     target: <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="m17.7 6.3 3-3" /></>,
     close: <path d="m6 6 12 12M18 6 6 18" />,
@@ -438,7 +439,14 @@ export default function HomePage() {
         method: "POST",
         cache: "no-store",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ studyDate, startTime, sessionToken: sessionToken ?? undefined }),
+        body: JSON.stringify({
+          studyDate,
+          startTime,
+          // Fuso do navegador (convenção getTimezoneOffset: UTC−3 → 180) para o
+          // servidor interpretar a data/hora escolhida no fuso do usuário.
+          tzOffset: new Date().getTimezoneOffset(),
+          sessionToken: sessionToken ?? undefined,
+        }),
       });
       const payload = await response.json().catch(() => null) as (Dashboard & { message?: string }) | null;
       if (requestEpoch !== loadRequestRef.current) return;
@@ -669,6 +677,7 @@ export default function HomePage() {
             onDeleteObjective={(objectiveId) => void apiAction({ action: "delete-objective", values: { objectiveId } })}
             onCreateTopic={(payload) => void apiAction({ action: "create-topic", ...payload })}
             onDeleteTopic={(topicId) => void apiAction({ action: "delete-topic", topicId })}
+            onUpdateTopic={(topicId, payload) => void apiAction({ action: "update-topic", topicId, ...payload })}
           />
         );
       case "tasks":
@@ -765,10 +774,11 @@ export default function HomePage() {
         <div className="page-content">
           {data.user.clockMode === "simulated" ? (
             <div className="simulated-time-banner">
-              <span>
-                <Icon name="bolt" size={14} /> Modo simulação ativo: exibindo como{" "}
-                <strong>{formatClock(data.user.clockNow)}</strong>
+              <span className="sim-banner-label">
+                <Icon name="bolt" size={14} />
+                <span className="sim-banner-text">Modo simulação ativo: exibindo como</span>
               </span>
+              <strong>{formatClock(data.user.clockNow)}</strong>
               <button
                 type="button"
                 className="banner-reset-btn"
@@ -800,6 +810,7 @@ export default function HomePage() {
       {extraOpen ? (
         <ExtraSessionModal
           topics={data.topics}
+          today={data.today}
           onClose={() => setExtraOpen(false)}
           onCreate={(topicId, options) => void handleCreateExtraSession(topicId, options)}
         />
@@ -1060,7 +1071,7 @@ function CyclesView({ data, createOpen, setCreateOpen, onCreate, onDelete, onSav
         </>
       )}
     </>}
-    {createOpen && <CreateCycleModal topics={data.topics} onClose={() => setCreateOpen(false)} onCreate={(payload) => { setCreateOpen(false); onCreate(payload); }} />}
+    {createOpen && <CreateCycleModal topics={data.topics} today={data.today} onClose={() => setCreateOpen(false)} onCreate={(payload) => { setCreateOpen(false); onCreate(payload); }} />}
     {editingScheduleCycle && (
       <ScheduleEditModal
         topics={data.topics}
@@ -1164,10 +1175,11 @@ function CycleCard({ cycle, rows, days, onOpen, onDelete, onEditSchedule }: {
   );
 }
 
-function CreateCycleModal({ topics, onClose, onCreate }: { topics: TopicItem[]; onClose: () => void; onCreate: (payload: CreateCyclePayload) => void }) {
+function CreateCycleModal({ topics, today, onClose, onCreate }: { topics: TopicItem[]; today: string; onClose: () => void; onCreate: (payload: CreateCyclePayload) => void }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
+  // "Hoje" da plataforma (relógio simulado quando ativo), não a data do navegador.
+  const [startDate, setStartDate] = useState(today);
   const [duration, setDuration] = useState(90);
   const [selected, setSelected] = useState<string[]>([]);
   const [newTopicName, setNewTopicName] = useState("");
@@ -1615,16 +1627,19 @@ function ProfileModal({
 
 function ExtraSessionModal({
   topics,
+  today,
   onClose,
   onCreate,
 }: {
   topics: TopicItem[];
+  today: string;
   onClose: () => void;
   onCreate: (topicId: string, options: { studyDate?: string; startTime?: string; endTime?: string }) => void;
 }) {
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
   const [retroactive, setRetroactive] = useState(false);
-  const [studyDate, setStudyDate] = useState(() => new Date().toISOString().slice(0, 10));
+  // "Hoje" da plataforma (relógio simulado quando ativo), não a data do navegador.
+  const [studyDate, setStudyDate] = useState(today);
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
 
@@ -1668,7 +1683,7 @@ function ExtraSessionModal({
             <div className="retro-fields">
               <label className="field">
                 <span>Data do estudo</span>
-                <input type="date" value={studyDate} max={new Date().toISOString().slice(0, 10)} onChange={(event) => setStudyDate(event.target.value)} />
+                <input type="date" value={studyDate} max={today} onChange={(event) => setStudyDate(event.target.value)} />
               </label>
               <label className="field">
                 <span>Início</span>
@@ -2267,6 +2282,7 @@ function TopicsView({
   onDeleteObjective,
   onCreateTopic,
   onDeleteTopic,
+  onUpdateTopic,
 }: {
   data: Dashboard;
   onCreateObjective: (topicId: string, title: string) => void;
@@ -2274,12 +2290,52 @@ function TopicsView({
   onDeleteObjective: (objectiveId: string) => void;
   onCreateTopic: (payload: { topicName: string; topicDescription: string; topicColor: string }) => void;
   onDeleteTopic: (topicId: string) => void;
+  onUpdateTopic: (topicId: string, payload: { topicName: string; topicDescription: string }) => void;
 }) {
   const [expandedTopic, setExpandedTopic] = useState<string | null>(null);
   const [newObjTitle, setNewObjTitle] = useState("");
   const [deletingObj, setDeletingObj] = useState<Objective | null>(null);
   const [createTopicOpen, setCreateTopicOpen] = useState(false);
   const [deletingTopic, setDeletingTopic] = useState<TopicItem | null>(null);
+  // Menu de ações do card e edição de tema.
+  const [menuTopicId, setMenuTopicId] = useState<string | null>(null);
+  const [editingTopic, setEditingTopic] = useState<TopicItem | null>(null);
+  // Renomeação inline: id do objetivo em edição + rascunho do título.
+  const [editingObjId, setEditingObjId] = useState<string | null>(null);
+  const [objDraft, setObjDraft] = useState("");
+  const editingObjRef = useRef<string | null>(null);
+  const objInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Foco e seleção do texto assim que a edição abre.
+  useEffect(() => {
+    if (editingObjId && objInputRef.current) {
+      objInputRef.current.focus();
+      objInputRef.current.select();
+    }
+  }, [editingObjId]);
+
+  const startObjEdit = (obj: Objective) => {
+    editingObjRef.current = obj.id;
+    setEditingObjId(obj.id);
+    setObjDraft(obj.title);
+  };
+
+  const cancelObjEdit = () => {
+    editingObjRef.current = null;
+    setEditingObjId(null);
+    setObjDraft("");
+  };
+
+  // Salva somente se houve alteração real (Enter, blur ou botão de check).
+  const commitObjEdit = (obj: Objective) => {
+    if (editingObjRef.current !== obj.id) return;
+    editingObjRef.current = null;
+    setEditingObjId(null);
+    setObjDraft("");
+    const next = objDraft.trim();
+    if (!next || next === obj.title) return;
+    onUpdateObjective(obj.id, { title: next });
+  };
 
   const submitObj = (topicId: string) => {
     if (!newObjTitle.trim()) return;
@@ -2320,13 +2376,35 @@ function TopicsView({
             <article key={topic.id} className={`topic-card ${isExpanded ? "topic-expanded" : ""}`}>
               <div className={`topic-icon ${topic.color}`}><Icon name="book" size={22} /></div>
               <button
-                className="delete-btn topic-delete"
-                onClick={() => setDeletingTopic(topic)}
-                aria-label="Excluir tema"
-                title="Excluir tema"
+                className="topic-menu-btn"
+                onClick={() => setMenuTopicId(menuTopicId === topic.id ? null : topic.id)}
+                aria-label="Menu do tema"
+                aria-expanded={menuTopicId === topic.id}
+                title="Menu"
               >
-                <Icon name="trash" size={14} />
+                <Icon name="more-v" size={17} />
               </button>
+              {menuTopicId === topic.id ? (
+                <>
+                  <div className="topic-menu-backdrop" onClick={() => setMenuTopicId(null)} />
+                  <div className="topic-menu" role="menu" aria-label="Ações do tema">
+                    <button
+                      className="topic-menu-item"
+                      role="menuitem"
+                      onClick={() => { setMenuTopicId(null); setEditingTopic(topic); }}
+                    >
+                      <Icon name="edit" size={14} /> Editar tema
+                    </button>
+                    <button
+                      className="topic-menu-item danger"
+                      role="menuitem"
+                      onClick={() => { setMenuTopicId(null); setDeletingTopic(topic); }}
+                    >
+                      <Icon name="trash" size={14} /> Excluir tema
+                    </button>
+                  </div>
+                </>
+              ) : null}
               <h2>{topic.name}</h2>
               <p>{topic.description}</p>
               <div className="topic-meta"><span>{sessions.length} sessões</span><span>{open} pendências</span><span>{topicObjs.length} objetivos</span></div>
@@ -2356,7 +2434,49 @@ function TopicsView({
                             {obj.status === "completed" ? <Icon name="check" size={12} stroke={3} /> : obj.status === "in_progress" ? <Icon name="bolt" size={12} /> : null}
                           </button>
                           <div className="obj-info">
-                            <span className="obj-title">{obj.title}</span>
+                            {editingObjId === obj.id ? (
+                              <span className="obj-edit-box">
+                                <input
+                                  ref={objInputRef}
+                                  className="obj-edit-input"
+                                  value={objDraft}
+                                  maxLength={220}
+                                  onChange={(event) => setObjDraft(event.target.value)}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      event.preventDefault();
+                                      commitObjEdit(obj);
+                                    } else if (event.key === "Escape") {
+                                      event.preventDefault();
+                                      cancelObjEdit();
+                                    }
+                                  }}
+                                  onBlur={() => commitObjEdit(obj)}
+                                  aria-label="Renomear objetivo"
+                                />
+                                {objDraft.trim() !== obj.title && objDraft.trim() !== "" ? (
+                                  <button
+                                    type="button"
+                                    className="obj-edit-save"
+                                    title="Salvar alteração"
+                                    aria-label="Salvar alteração"
+                                    onMouseDown={(event) => event.preventDefault()}
+                                    onClick={() => commitObjEdit(obj)}
+                                  >
+                                    <Icon name="check" size={13} stroke={3} />
+                                  </button>
+                                ) : null}
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="obj-title-edit"
+                                title="Clique para renomear o objetivo"
+                                onClick={() => startObjEdit(obj)}
+                              >
+                                {obj.title}
+                              </button>
+                            )}
                             <ObjectiveProgressSlider
                               objective={obj}
                               onCommit={(progress, status) => onUpdateObjective(obj.id, { progress, status })}
@@ -2412,6 +2532,17 @@ function TopicsView({
             onDeleteTopic(deletingTopic.id);
             setDeletingTopic(null);
             setExpandedTopic(null);
+          }}
+        />
+      ) : null}
+      {editingTopic ? (
+        <TopicEditModal
+          topic={editingTopic}
+          onClose={() => setEditingTopic(null)}
+          onSave={(payload) => {
+            const topicId = editingTopic.id;
+            setEditingTopic(null);
+            onUpdateTopic(topicId, payload);
           }}
         />
       ) : null}
@@ -2482,6 +2613,62 @@ function TopicCreateModal({
           <button className="ghost-button" onClick={onClose}>Cancelar</button>
           <button className="primary-button" onClick={submit} disabled={!name.trim()}>
             <Icon name="plus" size={16} /> Criar tema
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TopicEditModal({
+  topic,
+  onClose,
+  onSave,
+}: {
+  topic: TopicItem;
+  onClose: () => void;
+  onSave: (payload: { topicName: string; topicDescription: string }) => void;
+}) {
+  const [name, setName] = useState(topic.name);
+  const [description, setDescription] = useState(topic.description ?? "");
+
+  const submit = () => {
+    if (!name.trim()) return;
+    onSave({ topicName: name.trim(), topicDescription: description.trim() });
+  };
+
+  return (
+    <div className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="modal-card" role="dialog" aria-modal="true" aria-label="Editar tema">
+        <div className="modal-header">
+          <div>
+            <h2>Editar tema</h2>
+            <p>As alterações valem para o app inteiro: Tema do dia, ciclos, rotina, tarefas e histórico.</p>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="Fechar"><Icon name="close" /></button>
+        </div>
+        <div className="modal-body">
+          <div className="form-grid">
+            <label className="field span2">
+              <span>Nome do tema *</span>
+              <input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); submit(); } }}
+                placeholder="Ex.: Redes de Distribuição Aérea"
+                autoFocus
+              />
+            </label>
+            <label className="field span2">
+              <span>Descrição</span>
+              <textarea rows={2} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="O que este tema aborda?" />
+            </label>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="ghost-button" onClick={onClose}>Cancelar</button>
+          <button className="primary-button" onClick={submit} disabled={!name.trim()}>
+            <Icon name="save" size={15} /> Salvar alterações
           </button>
         </div>
       </div>

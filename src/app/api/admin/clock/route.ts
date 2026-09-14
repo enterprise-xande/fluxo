@@ -29,7 +29,7 @@ export async function POST(request: Request) {
 
     // A função verifica a categoria atual no banco e só modifica o relógio
     // deste usuário. Tokens, cookies e datas de expiração não são alterados.
-    await updateUserClock(user.id, body.studyDate, body.startTime);
+    await updateUserClock(user.id, body.studyDate, body.startTime, body.tzOffset);
     return Response.json(await getStudyDashboard(user.id), { headers });
   } catch (error) {
     if (error instanceof ClockUpdateError) {

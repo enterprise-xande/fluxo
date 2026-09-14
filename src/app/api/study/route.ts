@@ -12,6 +12,7 @@ import {
   ownedTopicIds,
   ownsCycle,
   updateCycleSchedule,
+  updateTopic,
   type CreateCycleInput,
 } from "@/lib/study-data";
 
@@ -20,16 +21,19 @@ export const dynamic = "force-dynamic";
 const UNAUTHORIZED = { message: "Faça login para continuar." };
 
 function getCurrentTime(user: ClockFields, now: Date) {
+  // Parede no fuso do usuário: subtrai o offset (UTC = parede + offset) e lê em UTC.
+  const shifted = new Date(now.getTime() - (user.clockTzOffset ?? 0) * 60000);
   return new Intl.DateTimeFormat("pt-BR", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-  }).format(now);
+    timeZone: "UTC",
+  }).format(shifted);
 }
 
-function getTodayIso(now: Date) {
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
-  return local.toISOString().slice(0, 10);
+function getTodayIso(user: ClockFields, now: Date) {
+  const shifted = new Date(now.getTime() - (user.clockTzOffset ?? 0) * 60000);
+  return shifted.toISOString().slice(0, 10);
 }
 
 function journalValues(values: Record<string, string | number | null>) {
@@ -70,6 +74,7 @@ export async function POST(request: Request) {
       studyDate?: string;
       startTime?: string;
       endTime?: string;
+      tzOffset?: unknown;
       values?: Record<string, string | number | null>;
       name?: string;
       description?: string;
@@ -88,7 +93,7 @@ export async function POST(request: Request) {
     const userId = sessionUser.id;
 
     if (body.action === "update-system-time") {
-      await updateUserClock(userId, body.studyDate, body.startTime);
+      await updateUserClock(userId, body.studyDate, body.startTime, body.tzOffset);
       return Response.json(await getStudyDashboard(userId), { headers: { "Cache-Control": "private, no-store" } });
     }
 
@@ -141,7 +146,7 @@ export async function POST(request: Request) {
         return Response.json({ message: "Tema ou ciclo inválido para esta conta." }, { status: 403 });
       }
 
-      const studyDate = typeof body.studyDate === "string" && body.studyDate ? body.studyDate : getTodayIso(now);
+      const studyDate = typeof body.studyDate === "string" && body.studyDate ? body.studyDate : getTodayIso(user, now);
       const startTime = typeof body.startTime === "string" && body.startTime ? body.startTime : getCurrentTime(user, now);
       const endTime = typeof body.endTime === "string" && body.endTime ? body.endTime : null;
 
@@ -176,12 +181,13 @@ export async function POST(request: Request) {
         .limit(1);
       if (task) {
         const completed = task.status !== "completed";
+        // Carimbo no relógio da plataforma (simulado quando ativo), não no real.
         await db
           .update(tasks)
           .set({
             status: completed ? "completed" : "pending",
-            completedAt: completed ? new Date() : null,
-            updatedAt: new Date(),
+            completedAt: completed ? now : null,
+            updatedAt: now,
           })
           .where(eq(tasks.id, task.id));
       }
@@ -199,6 +205,10 @@ export async function POST(request: Request) {
         priority: body.priority && ["low", "medium", "high"].includes(body.priority) ? body.priority : "medium",
         status: "pending",
         sessionId: body.sessionId ?? null,
+        // Abertura no relógio da plataforma (simulado quando ativo); sem isto
+        // o banco preencheria com a hora real do servidor.
+        createdAt: now,
+        updatedAt: now,
       });
     }
 
@@ -212,13 +222,13 @@ export async function POST(request: Request) {
       const input: CreateCycleInput = {
         name: body.name ?? "",
         description: body.description ?? "",
-        startDate: body.startDate ?? getTodayIso(now),
+        startDate: body.startDate ?? getTodayIso(user, now),
         durationDays: Number(body.durationDays) || 90,
         topics: Array.isArray(body.topics) ? body.topics : [],
         schedule: Array.isArray(body.schedule) ? body.schedule : [],
       };
       if (!input.name.trim()) return Response.json({ message: "Informe o nome do ciclo." }, { status: 400 });
-      await createStudyCycle(userId, input, now);
+      await createStudyCycle(userId, input, now, user.clockTzOffset ?? 0);
     }
 
     if (body.action === "delete-cycle" && body.cycleId) {
@@ -226,7 +236,7 @@ export async function POST(request: Request) {
     }
 
     if (body.action === "update-schedule" && body.cycleId && Array.isArray(body.entries)) {
-      await updateCycleSchedule(userId, body.cycleId, body.entries, now);
+      await updateCycleSchedule(userId, body.cycleId, body.entries, now, user.clockTzOffset ?? 0);
     }
 
     /* ---------- Temas ---------- */
@@ -236,6 +246,13 @@ export async function POST(request: Request) {
         name: body.topicName,
         description: body.topicDescription ?? null,
         color: body.topicColor,
+      });
+    }
+
+    if (body.action === "update-topic" && body.topicId) {
+      await updateTopic(userId, body.topicId, {
+        name: typeof body.topicName === "string" ? body.topicName : undefined,
+        description: typeof body.topicDescription === "string" ? body.topicDescription : undefined,
       });
     }
 
@@ -262,7 +279,11 @@ export async function POST(request: Request) {
       const vals = body.values as Record<string, unknown>;
       const id = vals.objectiveId as string;
       const updates: Record<string, unknown> = {};
-      if (typeof vals.title === "string") updates.title = vals.title.trim();
+      if (typeof vals.title === "string") {
+        const t = vals.title.trim();
+        // Nunca zera o título: vazio é simplesmente ignorado.
+        if (t) updates.title = t.slice(0, 220);
+      }
       if (typeof vals.progress === "number") updates.progress = Math.max(0, Math.min(100, vals.progress));
       if (typeof vals.status === "string" && ["not_started", "in_progress", "completed"].includes(vals.status as string)) {
         updates.status = vals.status;
