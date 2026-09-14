@@ -181,12 +181,13 @@ export async function POST(request: Request) {
         .limit(1);
       if (task) {
         const completed = task.status !== "completed";
+        // Carimbo no relógio da plataforma (simulado quando ativo), não no real.
         await db
           .update(tasks)
           .set({
             status: completed ? "completed" : "pending",
-            completedAt: completed ? new Date() : null,
-            updatedAt: new Date(),
+            completedAt: completed ? now : null,
+            updatedAt: now,
           })
           .where(eq(tasks.id, task.id));
       }
@@ -204,6 +205,10 @@ export async function POST(request: Request) {
         priority: body.priority && ["low", "medium", "high"].includes(body.priority) ? body.priority : "medium",
         status: "pending",
         sessionId: body.sessionId ?? null,
+        // Abertura no relógio da plataforma (simulado quando ativo); sem isto
+        // o banco preencheria com a hora real do servidor.
+        createdAt: now,
+        updatedAt: now,
       });
     }
 
